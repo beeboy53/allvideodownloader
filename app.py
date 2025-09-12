@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import yt_dlp
@@ -35,7 +35,8 @@ def home():
 @app.get("/download")
 def download_video(
     url: str = Query(..., description="Video URL to download"),
-    expiry: int = Query(3600, description="File expiry in seconds (default 3600s = 1 hour)")
+    expiry: int = Query(3600, description="File expiry in seconds (default 3600s = 1 hour)"),
+    request: Request = None
 ):
     """
     Download & merge best video + audio, return API link to final MP4.
@@ -59,8 +60,9 @@ def download_video(
         # Save expiry timestamp
         FILE_EXPIRY[f"{file_id}.mp4"] = time.time() + expiry
 
-        # API endpoint to fetch the file
-        file_url = f"/files/{file_id}.mp4"
+        # Build absolute API file URL
+        base_url = str(request.base_url).rstrip("/")
+        file_url = f"{base_url}/files/{file_id}.mp4"
 
         return {
             "title": info.get("title"),
