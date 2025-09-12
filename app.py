@@ -1,125 +1,65 @@
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 import yt_dlp
-import tempfile
-import os
-import uuid
-import time
-import threading
 
 app = FastAPI()
 
-# ✅ Enable CORS
+# ✅ Enable CORS so WordPress (and browsers) can fetch from your API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # restrict later to your domain
+    allow_origins=["*"],  # You can restrict later, e.g., ["https://yourdomain.com"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Temporary directory for merged MP4s
-DOWNLOAD_DIR = os.path.join(tempfile.gettempdir(), "video_downloader")
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-# File expiry tracker {filename: expiry_timestamp}
-FILE_EXPIRY = {}
-
-
 @app.get("/")
 def home():
     return {"message": "Video Downloader API is running 🚀"}
 
-
 @app.get("/download")
-def download_video(
-    url: str = Query(..., description="Video URL to download"),
-    expiry: int = Query(3600, description="File expiry in seconds (default 3600s = 1 hour)"),
-    request: Request = None
-):
-    """
-    Download & merge best video + audio, return API link to final MP4.
-    Files auto-delete after `expiry` seconds.
-    """
+def download_video(url: str = Query(..., description="Video URL to download")):
     try:
-        # Generate random file name
-        file_id = str(uuid.uuid4())
-        output_path = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
-
         ydl_opts = {
             "quiet": True,
-            "format": "bestvideo+bestaudio/best",  # ✅ Merge best video + audio
-            "merge_output_format": "mp4",
-            "outtmpl": output_path,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(url, download=False)
 
-        # Save expiry timestamp
-        FILE_EXPIRY[f"{file_id}.mp4"] = time.time() + expiry
+        formats_list = []
+        for f in info.get("formats", []):
+            # We only want formats with a direct URL that we can use
+            if f.get("url"):
+                formats_list.append({
+                    "url": f.get("url"),
+                    "ext": f.get("ext"),
+                    "height": f.get("height"),
+                    "width": f.get("width"),
+                    # These are the crucial keys to check for audio/video presence
+                    "acodec": f.get("acodec"),
+                    "vcodec": f.get("vcodec"),
+                    "quality": f.get("format_note") or (f.get("height") and f"{f.get('height')}p"),
+                })
+        
+        # --- ✨ KEY CHANGE: SORTING THE FORMATS ---
+        # We sort by two criteria in descending order:
+        # 1. (Primary) Prioritize formats that have BOTH video and audio.
+        # 2. (Secondary) Sort by resolution (height) from highest to lowest.
+        def sort_key(f):
+            has_video = f.get("vcodec") is not None and f["vcodec"] != "none"
+            has_audio = f.get("acodec") is not None and f["acodec"] != "none"
+            height = f.get("height") or 0
+            # This tuple ensures sorting happens in the desired order
+            return (has_video and has_audio, height)
 
-        # Build absolute API file URL
-        base_url = str(request.base_url).rstrip("/")
-        file_url = f"{base_url}/files/{file_id}.mp4"
+        # 'reverse=True' makes the highest values (True, 1080p) appear first
+        sorted_formats = sorted(formats_list, key=sort_key, reverse=True)
 
         return {
             "title": info.get("title"),
             "thumbnail": info.get("thumbnail"),
-            "download_url": file_url,
-            "expires_in": expiry,
+            "formats": sorted_formats  # ✅ Return the newly sorted list
         }
-
     except Exception as e:
         return {"error": str(e)}
-
-
-@app.get("/files/{filename}")
-def serve_file(filename: str):
-    """
-    Serve downloaded video files if not expired
-    """
-    file_path = os.path.join(DOWNLOAD_DIR, filename)
-
-    # Check expiry
-    if filename in FILE_EXPIRY:
-        if time.time() > FILE_EXPIRY[filename]:
-            try:
-                os.remove(file_path)
-            except Exception:
-                pass
-            FILE_EXPIRY.pop(filename, None)
-            return {"error": "File expired and removed"}
-
-    if os.path.exists(file_path):
-        return FileResponse(file_path, media_type="video/mp4", filename=filename)
-
-    return {"error": "File not found"}
-
-
-# 🧹 Background cleaner: delete expired files
-def cleanup_old_files():
-    while True:
-        now = time.time()
-        expired = []
-        for fname, expiry in FILE_EXPIRY.items():
-            if now > expiry:
-                fpath = os.path.join(DOWNLOAD_DIR, fname)
-                if os.path.isfile(fpath):
-                    try:
-                        os.remove(fpath)
-                        print(f"🧹 Deleted expired file: {fpath}")
-                    except Exception as e:
-                        print(f"⚠️ Cleanup error: {e}")
-                expired.append(fname)
-
-        # Remove from tracker
-        for fname in expired:
-            FILE_EXPIRY.pop(fname, None)
-
-        time.sleep(300)  # Run every 5 minutes
-
-
-# Start cleaner in background
-threading.Thread(target=cleanup_old_files, daemon=True).start()
