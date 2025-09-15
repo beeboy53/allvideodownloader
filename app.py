@@ -8,98 +8,70 @@ import os
 import uuid
 import logging
 import time
-from urllib.parse import urlencode
+import threading
 
-# --- Cookies setup (optional from Gist for TikTok/Instagram auth) ---
-COOKIE_FILE_PATH = "/tmp/cookies.txt"
-cookie_gist_url = os.getenv("COOKIE_GIST_URL")
-if cookie_gist_url:
-    try:
-        response = requests.get(cookie_gist_url)
-        response.raise_for_status()
-        with open(COOKIE_FILE_PATH, "w") as f:
-            f.write(response.text)
-        logging.info("✅ Cookies loaded from Gist.")
-    except Exception as e:
-        logging.error(f"⚠️ Failed to load cookies: {e}")
-        open(COOKIE_FILE_PATH, "a").close()
-else:
-    open(COOKIE_FILE_PATH, "a").close()
-
-# --- Logging ---
-logging.basicConfig(level=logging.INFO)
-
-# --- FastAPI App ---
 app = FastAPI()
 
+# Enable CORS
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # restrict later for production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-# Track temp files for cleanup
-TEMP_DIR = "/tmp/saveclips"
-os.makedirs(TEMP_DIR, exist_ok=True)
+# Directory for temporary merged files
+DOWNLOAD_DIR = "/tmp/saveclips"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# Track expiry times {filename: expiry_timestamp}
 FILE_EXPIRY = {}
 
-def cleanup_files(paths: list):
-    for path in paths:
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-                logging.info(f"🧹 Deleted file: {path}")
-        except Exception as e:
-            logging.error(f"Error cleaning {path}: {e}")
+def cleanup_files():
+    """Background job: remove expired files"""
+    while True:
+        now = time.time()
+        expired = [f for f, exp in FILE_EXPIRY.items() if now > exp]
+        for fname in expired:
+            try:
+                fpath = os.path.join(DOWNLOAD_DIR, fname)
+                if os.path.isfile(fpath):
+                    os.remove(fpath)
+                    logging.info(f"🧹 Deleted expired file {fname}")
+            except Exception as e:
+                logging.error(f"Error deleting {fname}: {e}")
+            FILE_EXPIRY.pop(fname, None)
+        time.sleep(300)  # check every 5 mins
+
+threading.Thread(target=cleanup_files, daemon=True).start()
 
 
 @app.get("/")
 def home():
-    return {"message": "SaveClips API is running 🚀"}
+    return {"message": "Video Downloader API is running 🚀"}
 
 
 @app.get("/info")
 async def get_video_info(request: Request, url: str):
-    """Fetch video metadata + formats (audio/video)."""
-    ydl_opts = {"quiet": True}
-    info = None
-    last_exception = None
-
-    # Retry logic
-    for attempt in range(3):
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-            if info:
-                break
-        except Exception as e:
-            last_exception = e
-            time.sleep(1)
-
-    if not info:
-        raise HTTPException(status_code=500, detail=f"Could not fetch video info. {last_exception}")
-
+    """Fetch metadata + formats"""
     try:
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+
         all_formats = []
+        video_only = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') == 'none']
+        audio_only = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
 
-        # Detect if video+audio merging is possible
-        video_only = [f for f in info.get("formats", []) if f.get("vcodec") != "none" and f.get("acodec") == "none" and f.get("url")]
-        audio_only = [f for f in info.get("formats", []) if f.get("acodec") != "none" and f.get("vcodec") == "none" and f.get("url")]
-
+        # Add merged option if both exist
         if video_only and audio_only:
-            merge_url = str(request.base_url) + "merge_streams?" + urlencode({"url": url})
+            merge_url = str(request.base_url) + "merge_streams?url=" + url
             all_formats.append({
-                "quality": "Best Quality (Merged)",
-                "ext": "mp4",
-                "url": merge_url,
-                "vcodec": "merged",
-                "acodec": "merged",
-                "height": max(v.get("height", 0) for v in video_only)
+                'quality': 'Best Quality (Merged)',
+                'ext': 'mp4',
+                'url': merge_url,
+                'download_url': merge_url,
+                'vcodec': 'merged',
+                'acodec': 'merged',
+                'height': max(v.get('height', 0) for v in video_only)
             })
 
-        # Add direct formats
         for f in info.get("formats", []):
             if f.get("url"):
                 all_formats.append({
@@ -109,90 +81,68 @@ async def get_video_info(request: Request, url: str):
                     "acodec": f.get("acodec"),
                     "vcodec": f.get("vcodec"),
                     "quality": f.get("format_note") or (f.get("height") and f"{f.get('height')}p") or "Audio",
+                    "filesize": f.get("filesize"),
+                    "filesize_approx": f.get("filesize_approx")
                 })
-
-        # Sort by quality
-        sorted_formats = sorted(all_formats, key=lambda x: x.get("height") or 0, reverse=True)
 
         return {
             "title": info.get("title"),
             "thumbnail": info.get("thumbnail"),
-            "formats": sorted_formats
+            "formats": sorted(all_formats, key=lambda x: x.get('height') or 0, reverse=True)
         }
+
     except Exception as e:
-        logging.error(f"Processing error: {e}")
-        raise HTTPException(status_code=500, detail="Failed to process formats.")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch video info: {str(e)}")
 
 
 @app.get("/merge_streams")
-async def merge_streams(url: str, background_tasks: BackgroundTasks, request: Request):
-    """Download best video+audio, merge, return JSON with download URL."""
+async def merge_streams(url: str):
+    """Download + merge best video/audio → return as forced file download"""
     try:
-        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        # Pick best video + audio
-        best_video = max((f for f in info["formats"] if f.get("vcodec") != "none" and f.get("acodec") == "none"), key=lambda x: x.get("height", 0))
-        best_audio = max((f for f in info["formats"] if f.get("acodec") != "none" and f.get("vcodec") == "none"), key=lambda x: x.get("abr", 0))
+        best_video = max((f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('acodec') == 'none'),
+                         key=lambda x: x.get('height', 0))
+        best_audio = max((f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none'),
+                         key=lambda x: x.get('abr', 0))
 
-        # Generate temp file paths
+        # Unique filenames
         request_id = str(uuid.uuid4())
-        video_path = os.path.join(TEMP_DIR, f"{request_id}_v.mp4")
-        audio_path = os.path.join(TEMP_DIR, f"{request_id}_a.m4a")
-        output_path = os.path.join(TEMP_DIR, f"{request_id}_o.mp4")
+        video_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_v.mp4")
+        audio_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_a.m4a")
+        output_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_o.mp4")
 
-        # Download video
-        with requests.get(best_video["url"], stream=True) as r:
+        # Download streams
+        with requests.get(best_video['url'], stream=True) as r:
             r.raise_for_status()
-            with open(video_path, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
+            with open(video_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
 
-        # Download audio
-        with requests.get(best_audio["url"], stream=True) as r:
+        with requests.get(best_audio['url'], stream=True) as r:
             r.raise_for_status()
-            with open(audio_path, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
+            with open(audio_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
 
-        # Merge with ffmpeg
-        ffmpeg_cmd = ["ffmpeg", "-y", "-i", video_path, "-i", audio_path, "-c", "copy", output_path]
+        # Merge
+        ffmpeg_cmd = ['ffmpeg', '-i', video_path, '-i', audio_path, '-c', 'copy', output_path]
         process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if process.returncode != 0:
-            raise HTTPException(status_code=500, detail="FFmpeg merge failed.")
+            raise HTTPException(status_code=500, detail="Failed to merge video/audio.")
 
-        # Schedule cleanup
-        background_tasks.add_task(cleanup_files, [video_path, audio_path, output_path])
+        # Track expiry (1h)
+        filename = os.path.basename(output_path)
+        FILE_EXPIRY[filename] = time.time() + 3600
 
-        # Serve via /files/
-        FILE_EXPIRY[os.path.basename(output_path)] = time.time() + 3600
-        file_url = str(request.base_url) + "files/" + os.path.basename(output_path)
+        # ✅ Force direct download
+        safe_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in info.get("title", "video"))
+        return FileResponse(
+            path=output_path,
+            media_type="application/octet-stream",
+            filename=f"{safe_title}.mp4",
+            headers={"Content-Disposition": f'attachment; filename="{safe_title}.mp4"'}
+        )
 
-        return {
-            "status": "ok",
-            "title": info.get("title"),
-            "download_url": file_url,
-            "expires_in": 3600
-        }
     except Exception as e:
         logging.error(f"Merge error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/files/{filename}")
-async def serve_file(filename: str):
-    """Serve merged file if not expired."""
-    file_path = os.path.join(TEMP_DIR, filename)
-
-    # Expiry check
-    expiry = FILE_EXPIRY.get(filename)
-    if expiry and time.time() > expiry:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        FILE_EXPIRY.pop(filename, None)
-        raise HTTPException(status_code=410, detail="File expired")
-
-    if os.path.exists(file_path):
-        return FileResponse(file_path, media_type="video/mp4", filename=filename)
-
-    raise HTTPException(status_code=404, detail="File not found")
