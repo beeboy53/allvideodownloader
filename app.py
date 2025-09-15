@@ -94,3 +94,66 @@ async def get_video_info(request: Request, url: str):
     except Exception as e:
         logging.error(f"Error processing formats for URL {url}: {e}")
         return {"error": "Successfully fetched video, but failed to process the download formats."}
+# Add this new endpoint to your existing main.py file
+
+@app.get("/instagram_info")
+async def get_instagram_info(request: Request, url: str):
+    """
+    Dedicated endpoint for Instagram that handles single posts and carousels (multi-image/video).
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True, # Ensures it only gets the single post
+    }
+    # This endpoint requires cookies to work reliably
+    if COOKIE_FILE_PATH.exists() and COOKIE_FILE_PATH.stat().st_size > 0:
+        ydl_opts['cookiefile'] = str(COOKIE_FILE_PATH)
+    else:
+        return {"error": "Server is not configured for Instagram downloads. Cookie file is missing."}
+
+    info = None
+    last_exception = None
+    for attempt in range(3):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if info:
+                break
+        except Exception as e:
+            last_exception = e
+            logging.warning(f"Instagram attempt {attempt + 1} failed. Retrying...")
+            time.sleep(1)
+
+    if not info:
+        logging.error(f"All Instagram retry attempts failed. Last error: {last_exception}")
+        return {"error": "Could not retrieve Instagram post. The link may be invalid or the post is private."}
+
+    try:
+        media_items = []
+        
+        # Check if this is a carousel post (multi-image/video)
+        if 'entries' in info:
+            # It's a carousel, loop through each item
+            for entry in info['entries']:
+                media_items.append({
+                    "type": "video" if entry.get('vcodec') != 'none' else "image",
+                    "thumbnail": entry.get('thumbnail'),
+                    "url": entry.get('url') # Direct download URL
+                })
+        else:
+            # It's a single post
+            media_items.append({
+                "type": "video" if info.get('vcodec') != 'none' else "image",
+                "thumbnail": info.get('thumbnail'),
+                "url": info.get('url') # Direct download URL for single video/image
+            })
+            
+        return {
+            "title": info.get('title'),
+            "uploader": info.get('uploader'),
+            "media": media_items
+        }
+    except Exception as e:
+        logging.error(f"Error processing Instagram formats: {e}")
+        return {"error": "Failed to process the Instagram media."}
