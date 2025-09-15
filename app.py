@@ -89,12 +89,11 @@ def home():
 @app.get("/info")
 async def get_video_info(request: Request, url: str):
     """Fetches video metadata and a list of all available download formats."""
-    # ✨ FIX: Reverted to a simpler ydl_opts, like your original working code.
-    # This is more reliable for finding all stream types.
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'format': 'bestvideo+bestaudio/best'
     }
     if COOKIE_FILE_PATH.exists() and COOKIE_FILE_PATH.stat().st_size > 0:
         ydl_opts['cookiefile'] = str(COOKIE_FILE_PATH)
@@ -119,17 +118,38 @@ async def get_video_info(request: Request, url: str):
 
     try:
         all_formats = []
-        video_only = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') == 'none' and f.get('url')]
-        audio_only = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none' and f.get('url')]
+        
+        # --- ✨ NEW: Smart Merge Logic ---
+        # 1. Find all available pre-merged formats.
+        pre_merged_formats = [
+            f for f in info.get('formats', []) 
+            if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('url')
+        ]
+        
+        # 2. Check if a 'good enough' pre-merged file exists (e.g., 720p or higher MP4).
+        good_pre_merged_exists = any(
+            (f.get('height') or 0) >= 720 and f.get('ext') == 'mp4' for f in pre_merged_formats
+        )
 
-        if video_only and audio_only:
-            query_params = urlencode({'url': url})
-            merge_url = str(request.base_url) + "merge_streams?" + query_params
-            all_formats.append({
-                'quality': 'Best Quality (Merged)', 'ext': 'mp4', 'url': merge_url,
-                'vcodec': 'merged', 'acodec': 'merged', 'height': max((v.get('height') or 0 for v in video_only))
-            })
+        # 3. If no good pre-merged file exists, THEN create the manual merge option.
+        if not good_pre_merged_exists:
+            logging.info("No high-quality pre-merged MP4 found. Checking if a manual merge is possible.")
+            video_only = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') == 'none' and f.get('url')]
+            audio_only = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none' and f.get('url')]
 
+            if video_only and audio_only:
+                logging.info("Separate streams found. Creating 'Best Quality (Merged)' option.")
+                query_params = urlencode({'url': url})
+                merge_url = str(request.base_url) + "merge_streams?" + query_params
+                all_formats.append({
+                    'quality': 'Best Quality (Merged)', 'ext': 'mp4', 'url': merge_url,
+                    'vcodec': 'merged', 'acodec': 'merged', 'height': max((v.get('height') or 0 for v in video_only))
+                })
+        else:
+            logging.info("Found a high-quality pre-merged file. Merge option will not be created.")
+        # --- End of Smart Merge Logic ---
+
+        # Add all originally available formats to the list
         for f in info.get("formats", []):
             if f.get("url"):
                 all_formats.append({
@@ -138,7 +158,11 @@ async def get_video_info(request: Request, url: str):
                     "quality": f.get("format_note") or (f.get("height") and f"{f.get('height')}p") or "Audio",
                 })
         
-        sorted_formats = sorted(all_formats, key=lambda x: (x.get('height') or 0, x.get('vcodec') == 'merged'), reverse=True)
+        # Remove duplicates based on URL, keeping the first occurrence (which would be our merged one if it exists)
+        unique_formats = list({f['url']: f for f in all_formats}.values())
+        
+        # Sort by height (descending), putting our "merged" option first
+        sorted_formats = sorted(unique_formats, key=lambda x: (x.get('height') or 0, x.get('vcodec') == 'merged'), reverse=True)
 
         return {"title": info.get("title"), "thumbnail": info.get("thumbnail"), "formats": sorted_formats}
     except Exception as e:
