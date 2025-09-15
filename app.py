@@ -1,49 +1,31 @@
-from fastapi import FastAPI, Query, HTTPException, BackgroundTasks, Request
-from fastapi.responses import FileResponse, RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
-import yt_dlp
-import requests
-import subprocess
 import os
 import uuid
+import time
 import logging
-import time 
+import subprocess
 from urllib.parse import urlencode
+from pathlib import Path
+from datetime import datetime, timedelta
 
-# --- ✨ NEW: SECURELY HANDLE COOKIES FROM A GIST URL ---
-# Define the path for our temporary cookie file
-COOKIE_FILE_PATH = "/tmp/cookies.txt"
+import requests
+import yt_dlp
+from fastapi import FastAPI, Query, HTTPException, BackgroundTasks, Request
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 
-# Read the secret Gist URL from the environment variable set in Railway
-cookie_gist_url = os.getenv("COOKIE_GIST_URL")
-
-# If the URL exists, download its content and write it to the temporary file
-if cookie_gist_url:
-    try:
-        response = requests.get(cookie_gist_url)
-        response.raise_for_status() # Raise an exception for bad status codes
-        with open(COOKIE_FILE_PATH, "w") as f:
-            f.write(response.text)
-        logging.info("Successfully loaded cookies from Gist.")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Failed to download cookies from Gist: {e}")
-        # Create an empty file so the app doesn't crash
-        open(COOKIE_FILE_PATH, 'a').close()
-else:
-    # If the env var isn't set, create an empty file
-    logging.warning("COOKIE_GIST_URL not set. Proceeding without cookies.")
-    open(COOKIE_FILE_PATH, 'a').close()
-# --- END OF NEW SECTION ---
-
-
+# --- Configuration & Setup ---
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
-)
+# Temporary file storage location (Railway-safe)
+TEMP_DIR = Path("/tmp")
+# Path for the cookie file, which will be loaded from a Gist
+COOKIE_FILE_PATH = TEMP_DIR / "cookies.txt"
 
+
+# --- Helper Functions ---
 def cleanup_files(paths: list):
+    """Immediately cleans up a specific list of files."""
     for path in paths:
         try:
             if os.path.exists(path):
@@ -51,36 +33,96 @@ def cleanup_files(paths: list):
         except Exception as e:
             logging.error(f"Error cleaning up file {path}: {e}")
 
+def cleanup_old_files():
+    """Cleans up any files in the temp directory older than 1 hour."""
+    logging.info(f"Running startup cleanup of old files in {TEMP_DIR}...")
+    now = datetime.now()
+    cutoff = now - timedelta(hours=1)
+    for path in TEMP_DIR.iterdir():
+        if path.is_file():
+            try:
+                file_mod_time = datetime.fromtimestamp(path.stat().st_mtime)
+                if file_mod_time < cutoff:
+                    os.remove(path)
+                    logging.info(f"Removed old temp file: {path.name}")
+            except Exception as e:
+                logging.error(f"Error during cleanup of old file {path.name}: {e}")
+
+def sanitize_filename(name: str) -> str:
+    """Removes characters that are invalid in filenames."""
+    # Allow letters, numbers, spaces, underscores, hyphens, and periods
+    return "".join(c for c in name if c.isalnum() or c in " ._-").rstrip()
+
+
+# --- App Events ---
+@app.on_event("startup")
+def startup_event():
+    """Tasks to run when the application starts."""
+    # Load cookies from the environment variable (Gist URL)
+    cookie_gist_url = os.getenv("COOKIE_GIST_URL")
+    if cookie_gist_url:
+        try:
+            response = requests.get(cookie_gist_url)
+            response.raise_for_status()
+            with open(COOKIE_FILE_PATH, "w") as f:
+                f.write(response.text)
+            logging.info("Successfully loaded cookies from Gist.")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"Failed to download cookies from Gist: {e}")
+    else:
+        logging.warning("COOKIE_GIST_URL not set. Proceeding without cookies.")
+    
+    # Clean up any leftover files from previous runs
+    cleanup_old_files()
+
+
+# --- Middleware ---
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# --- API Endpoints ---
 @app.get("/")
 def home():
-    return {"message": "Video Downloader API is running 🚀"}
+    return {"message": "SaveClips API is running 🚀"}
 
 @app.get("/info")
 async def get_video_info(request: Request, url: str):
-    ydl_opts = {'quiet': True}
-    
-    # --- ✨ NEW: Automatic Retry Logic ---
+    """
+    Fetches video metadata and a list of all available download formats.
+    """
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'noplaylist': True,
+    }
+    # Only add the cookiefile option if the file actually exists and has content
+    if COOKIE_FILE_PATH.exists() and COOKIE_FILE_PATH.stat().st_size > 0:
+        ydl_opts['cookiefile'] = str(COOKIE_FILE_PATH)
+
     info = None
     last_exception = None
-    for attempt in range(3): # Try up to 3 times
+    for attempt in range(3):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-            
-            # If we successfully get the info, stop retrying
             if info:
                 logging.info(f"Successfully fetched info for {url} on attempt {attempt + 1}")
-                break 
+                break
         except Exception as e:
             last_exception = e
-            logging.warning(f"Attempt {attempt + 1} failed for {url}. Retrying in 1 second...")
-            time.sleep(1) # Wait 1 second before the next attempt
+            logging.warning(f"Attempt {attempt + 1} failed for {url}. Retrying...")
+            time.sleep(1)
 
-    # If all retries failed, raise an error
     if not info:
         logging.error(f"All retry attempts failed for {url}. Last error: {last_exception}")
-        raise HTTPException(status_code=500, detail=f"Could not retrieve video information after multiple attempts. The link may be private or invalid.")
-    # --- End of Retry Logic ---
+        return {"error": "Could not retrieve video information. The link may be private, invalid, or the site may be unsupported."}
 
     try:
         all_formats = []
@@ -92,7 +134,7 @@ async def get_video_info(request: Request, url: str):
             merge_url = str(request.base_url) + "merge_streams?" + query_params
             all_formats.append({
                 'quality': 'Best Quality (Merged)', 'ext': 'mp4', 'url': merge_url,
-                'vcodec': 'merged', 'acodec': 'merged', 'height': max(v.get('height', 0) for v in video_only)
+                'vcodec': 'merged', 'acodec': 'merged', 'height': max((v.get('height') or 0 for v in video_only))
             })
 
         for f in info.get("formats", []):
@@ -103,31 +145,36 @@ async def get_video_info(request: Request, url: str):
                     "quality": f.get("format_note") or (f.get("height") and f"{f.get('height')}p") or "Audio",
                 })
         
-        sorted_formats = sorted(all_formats, key=lambda x: x.get('height') or 0, reverse=True)
+        # Sort by height (descending), putting merged format first if heights are equal
+        sorted_formats = sorted(all_formats, key=lambda x: (x.get('height') or 0, x.get('vcodec') == 'merged'), reverse=True)
 
-        return {
-            "title": info.get("title"), "thumbnail": info.get("thumbnail"), "formats": sorted_formats
-        }
+        return {"title": info.get("title"), "thumbnail": info.get("thumbnail"), "formats": sorted_formats}
     except Exception as e:
         logging.error(f"Error processing formats for URL {url}: {e}")
-        raise HTTPException(status_code=500, detail="Successfully fetched video, but failed to process formats.")
-
+        return {"error": "Successfully fetched video, but failed to process the download formats."}
 
 @app.get("/merge_streams")
 async def merge_streams(url: str, background_tasks: BackgroundTasks):
+    """
+    Downloads the best video and audio streams, merges them, and returns the
+    final MP4 file directly for download.
+    """
     try:
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+        with yt_dlp.YoutubeDL({'quiet': True, 'noplaylist': True}) as ydl:
             info = ydl.extract_info(url, download=False)
         
         best_video = max((f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), key=lambda x: x.get('height', 0))
         best_audio = max((f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), key=lambda x: x.get('abr', 0))
 
         request_id = str(uuid.uuid4())
-        video_path, audio_path, output_path = f"/tmp/{request_id}_v.mp4", f"/tmp/{request_id}_a.m4a", f"/tmp/{request_id}_o.mp4"
+        video_path = TEMP_DIR / f"{request_id}_v.mp4"
+        audio_path = TEMP_DIR / f"{request_id}_a.m4a"
+        output_path = TEMP_DIR / f"{request_id}_o.mp4"
         
         files_to_cleanup = [video_path, audio_path, output_path]
         background_tasks.add_task(cleanup_files, files_to_cleanup)
 
+        # Download video and audio files
         with requests.get(best_video['url'], stream=True) as r:
             r.raise_for_status()
             with open(video_path, 'wb') as f:
@@ -137,13 +184,19 @@ async def merge_streams(url: str, background_tasks: BackgroundTasks):
             with open(audio_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
         
-        ffmpeg_cmd = ['ffmpeg', '-i', video_path, '-i', audio_path, '-c', 'copy', output_path]
+        # Merge with ffmpeg
+        ffmpeg_cmd = ['ffmpeg', '-i', str(video_path), '-i', str(audio_path), '-c', 'copy', str(output_path)]
         process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if process.returncode != 0:
-            raise HTTPException(status_code=500, detail="Failed to merge files.")
+            logging.error(f"FFmpeg Error: {process.stderr}")
+            raise HTTPException(status_code=500, detail=f"Failed to merge files. FFmpeg error: {process.stderr}")
 
-        return FileResponse(path=output_path, media_type='video/mp4', filename=f"{info.get('title', 'video')}.mp4")
+        # Sanitize title for the filename
+        safe_filename = sanitize_filename(info.get('title', 'video')) + ".mp4"
+        
+        # ✨ KEY FIX: The 'filename' parameter forces a download (Content-Disposition: attachment)
+        return FileResponse(path=output_path, media_type='video/mp4', filename=safe_filename)
+
     except Exception as e:
         logging.error(f"Error in /merge_streams for URL {url}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+        raise HTTPException(status_code=500, detail="An unexpected error occurred during the merge process.")
