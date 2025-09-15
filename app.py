@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Query, HTTPException, BackgroundTasks, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 import requests
@@ -7,6 +7,7 @@ import subprocess
 import os
 import uuid
 import logging
+import time 
 from urllib.parse import urlencode
 
 logging.basicConfig(level=logging.INFO)
@@ -30,65 +31,64 @@ def home():
 
 @app.get("/info")
 async def get_video_info(request: Request, url: str):
-    """
-    Gets video info, all formats, and creates a special 'merge' URL if needed.
-    This is the main endpoint your frontend will call.
-    """
-    ydl_opts = {'quiet': True}
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    # ✅ ADDED 'cookiefile' OPTION
+    ydl_opts = {
+        'quiet': True,
+        'cookiefile': '/app/cookies.txt'
+    }
+    
+    info = None
+    last_exception = None
+    for attempt in range(3):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if info:
+                logging.info(f"Successfully fetched info for {url} on attempt {attempt + 1}")
+                break 
+        except Exception as e:
+            last_exception = e
+            logging.warning(f"Attempt {attempt + 1} failed for {url}. Retrying in 1 second...")
+            time.sleep(1)
 
+    if not info:
+        logging.error(f"All retry attempts failed for {url}. Last error: {last_exception}")
+        raise HTTPException(status_code=500, detail=f"Could not retrieve video information after multiple attempts. The link may be private or invalid.")
+
+    try:
         all_formats = []
-        
-        # --- ✨ INTELLIGENTLY CREATE A MERGED OPTION ---
         video_only = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') == 'none' and f.get('url')]
         audio_only = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none' and f.get('url')]
 
         if video_only and audio_only:
-            # Build the URL for our /merge_streams endpoint
             query_params = urlencode({'url': url})
             merge_url = str(request.base_url) + "merge_streams?" + query_params
-            
-            # Create a "virtual" format for the merged option
             all_formats.append({
-                'quality': 'Best Quality (Merged)',
-                'ext': 'mp4',
-                'url': merge_url,
-                'vcodec': 'merged', # Custom identifier for the frontend
-                'acodec': 'merged',
-                'height': max(v.get('height', 0) for v in video_only) # Get the max height for sorting
+                'quality': 'Best Quality (Merged)', 'ext': 'mp4', 'url': merge_url,
+                'vcodec': 'merged', 'acodec': 'merged', 'height': max(v.get('height', 0) for v in video_only)
             })
 
-        # Add all other real formats from yt-dlp to the list
         for f in info.get("formats", []):
             if f.get("url"):
                 all_formats.append({
-                    "url": f.get("url"),
-                    "ext": f.get("ext"),
-                    "height": f.get("height"),
-                    "acodec": f.get("acodec"),
-                    "vcodec": f.get("vcodec"),
+                    "url": f.get("url"), "ext": f.get("ext"), "height": f.get("height"),
+                    "acodec": f.get("acodec"), "vcodec": f.get("vcodec"),
                     "quality": f.get("format_note") or (f.get("height") and f"{f.get('height')}p") or "Audio",
                 })
         
-        # Sort the final list to put the best options at the top
         sorted_formats = sorted(all_formats, key=lambda x: x.get('height') or 0, reverse=True)
 
         return {
-            "title": info.get("title"),
-            "thumbnail": info.get("thumbnail"),
-            "formats": sorted_formats
+            "title": info.get("title"), "thumbnail": info.get("thumbnail"), "formats": sorted_formats
         }
     except Exception as e:
-        logging.error(f"Error in /info for URL {url}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.error(f"Error processing formats for URL {url}: {e}")
+        raise HTTPException(status_code=500, detail="Successfully fetched video, but failed to process formats.")
+
 
 @app.get("/merge_streams")
 async def merge_streams(url: str, background_tasks: BackgroundTasks):
-    """
-    This is the 'worker' endpoint. It downloads, merges, and serves the file.
-    """
+    # This endpoint doesn't need cookies because the /info endpoint already verified the URL is valid
     try:
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -97,9 +97,7 @@ async def merge_streams(url: str, background_tasks: BackgroundTasks):
         best_audio = max((f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none'), key=lambda x: x.get('abr', 0))
 
         request_id = str(uuid.uuid4())
-        video_path = f"/tmp/{request_id}_video.mp4"
-        audio_path = f"/tmp/{request_id}_audio.m4a"
-        output_path = f"/tmp/{request_id}_output.mp4"
+        video_path, audio_path, output_path = f"/tmp/{request_id}_v.mp4", f"/tmp/{request_id}_a.m4a", f"/tmp/{request_id}_o.mp4"
         
         files_to_cleanup = [video_path, audio_path, output_path]
         background_tasks.add_task(cleanup_files, files_to_cleanup)
