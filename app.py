@@ -9,6 +9,26 @@ import uuid
 import logging
 import time
 import threading
+import os, logging, requests
+
+# Path for temp cookies file
+COOKIE_FILE_PATH = "/tmp/cookies.txt"
+
+# Create file if it doesn’t exist (avoids crash)
+if not os.path.exists(COOKIE_FILE_PATH):
+    open(COOKIE_FILE_PATH, 'a').close()
+
+# Optional: load cookies from env var (GitHub Gist etc.)
+cookie_gist_url = os.getenv("COOKIE_GIST_URL")
+if cookie_gist_url:
+    try:
+        r = requests.get(cookie_gist_url)
+        r.raise_for_status()
+        with open(COOKIE_FILE_PATH, "w") as f:
+            f.write(r.text)
+        logging.info("✅ Cookies loaded")
+    except Exception as e:
+        logging.warning(f"Failed to load cookies: {e}")
 
 app = FastAPI()
 
@@ -152,3 +172,4 @@ async def merge_streams(url: str):
     except Exception as e:
         logging.error(f"Merge error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
