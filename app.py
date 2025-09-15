@@ -7,7 +7,7 @@ import subprocess
 import os
 import uuid
 import logging
-import time 
+import time # Import the time module for delays
 from urllib.parse import urlencode
 
 logging.basicConfig(level=logging.INFO)
@@ -31,29 +31,30 @@ def home():
 
 @app.get("/info")
 async def get_video_info(request: Request, url: str):
-    # ✅ ADDED 'cookiefile' OPTION
-    ydl_opts = {
-        'quiet': True,
-        'cookiefile': '/app/cookies.txt'
-    }
+    ydl_opts = {'quiet': True}
     
+    # --- ✨ NEW: Automatic Retry Logic ---
     info = None
     last_exception = None
-    for attempt in range(3):
+    for attempt in range(3): # Try up to 3 times
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
+            
+            # If we successfully get the info, stop retrying
             if info:
                 logging.info(f"Successfully fetched info for {url} on attempt {attempt + 1}")
                 break 
         except Exception as e:
             last_exception = e
             logging.warning(f"Attempt {attempt + 1} failed for {url}. Retrying in 1 second...")
-            time.sleep(1)
+            time.sleep(1) # Wait 1 second before the next attempt
 
+    # If all retries failed, raise an error
     if not info:
         logging.error(f"All retry attempts failed for {url}. Last error: {last_exception}")
         raise HTTPException(status_code=500, detail=f"Could not retrieve video information after multiple attempts. The link may be private or invalid.")
+    # --- End of Retry Logic ---
 
     try:
         all_formats = []
@@ -88,7 +89,6 @@ async def get_video_info(request: Request, url: str):
 
 @app.get("/merge_streams")
 async def merge_streams(url: str, background_tasks: BackgroundTasks):
-    # This endpoint doesn't need cookies because the /info endpoint already verified the URL is valid
     try:
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
