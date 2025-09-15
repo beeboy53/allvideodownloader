@@ -125,46 +125,49 @@ async def merge_streams(url: str):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        best_video = max((f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('acodec') == 'none'),
-                         key=lambda x: x.get('height', 0))
-        best_audio = max((f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none'),
-                         key=lambda x: x.get('abr', 0))
+        # Pick best video-only and best audio-only
+        best_video = max(
+            (f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('acodec') == 'none'),
+            key=lambda x: x.get('height', 0)
+        )
+        best_audio = max(
+            (f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none'),
+            key=lambda x: x.get('abr', 0)
+        )
 
         request_id = str(uuid.uuid4())
-        video_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_v.mp4")
-        audio_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_a.m4a")
-        output_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_o.mp4")
+        video_path = f"/tmp/{request_id}_v.mp4"
+        audio_path = f"/tmp/{request_id}_a.m4a"
+        output_path = f"/tmp/{request_id}_merged.mp4"
 
         # Download video
         with requests.get(best_video['url'], stream=True) as r:
             r.raise_for_status()
             with open(video_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+                for chunk in r.iter_content(8192): f.write(chunk)
 
         # Download audio
         with requests.get(best_audio['url'], stream=True) as r:
             r.raise_for_status()
             with open(audio_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
+                for chunk in r.iter_content(8192): f.write(chunk)
 
-        # Re-encode for compatibility
+        # Merge into playable MP4
         ffmpeg_cmd = [
-            'ffmpeg', '-y',
-            '-i', video_path, '-i', audio_path,
-            '-c:v', 'libx264', '-c:a', 'aac',
-            '-movflags', '+faststart',
+            "ffmpeg", "-y",
+            "-i", video_path, "-i", audio_path,
+            "-c:v", "libx264", "-c:a", "aac",
+            "-movflags", "+faststart",
             output_path
         ]
         process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if process.returncode != 0:
-            raise HTTPException(status_code=500, detail=f"FFmpeg error: {process.stderr}")
-
-        FILE_EXPIRY[os.path.basename(output_path)] = time.time() + 3600
+            raise HTTPException(status_code=500, detail=f"FFmpeg failed: {process.stderr}")
 
         safe_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in info.get("title", "video"))
         return FileResponse(
             path=output_path,
-            media_type="application/octet-stream",
+            media_type="video/mp4",
             filename=f"{safe_title}.mp4",
             headers={"Content-Disposition": f'attachment; filename="{safe_title}.mp4"'}
         )
@@ -172,4 +175,3 @@ async def merge_streams(url: str):
     except Exception as e:
         logging.error(f"Merge error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
