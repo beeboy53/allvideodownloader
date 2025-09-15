@@ -50,7 +50,8 @@ async def get_video_info(url: str):
                 })
 
         # ✅ Add merged MP4 option at the top
-        merge_url = f"/merge_streams?url={url}"
+        # inside get_video_info
+        merge_url = f"https://allvideodownloader-production-26b1.up.railway.app/merge_streams?url={url}"
         formats.insert(0, {
             "url": merge_url,
             "ext": "mp4",
@@ -127,3 +128,4 @@ async def merge_streams(url: str, background_tasks: BackgroundTasks):
     except Exception as e:
         logging.error(f"Merge error: {e}")
         raise HTTPException(status_code=500, detail=f"Merge error: {str(e)}")
+
