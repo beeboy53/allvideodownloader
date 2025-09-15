@@ -1,4 +1,5 @@
 fastapi
 uvicorn[standard]
-yt-dlp
+pip install --upgrade yt-dlp
 requests
+
