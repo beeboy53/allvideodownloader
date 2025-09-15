@@ -7,10 +7,10 @@ import subprocess
 import os
 import uuid
 import logging
-import time 
+import time
 from urllib.parse import urlencode
 
-# --- ✨ NEW: SECURELY HANDLE COOKIES FROM A GIST URL ---
+# --- SECURELY HANDLE COOKIES FROM A GIST URL ---
 # Define the path for our temporary cookie file
 COOKIE_FILE_PATH = "/tmp/cookies.txt"
 
@@ -21,7 +21,7 @@ cookie_gist_url = os.getenv("COOKIE_GIST_URL")
 if cookie_gist_url:
     try:
         response = requests.get(cookie_gist_url)
-        response.raise_for_status() # Raise an exception for bad status codes
+        response.raise_for_status()  # Raise an exception for bad status codes
         with open(COOKIE_FILE_PATH, "w") as f:
             f.write(response.text)
         logging.info("Successfully loaded cookies from Gist.")
@@ -33,7 +33,7 @@ else:
     # If the env var isn't set, create an empty file
     logging.warning("COOKIE_GIST_URL not set. Proceeding without cookies.")
     open(COOKIE_FILE_PATH, 'a').close()
-# --- END OF NEW SECTION ---
+# --- END OF SECTION ---
 
 
 logging.basicConfig(level=logging.INFO)
@@ -55,10 +55,9 @@ def cleanup_files(paths: list):
 def home():
     return {"message": "Video Downloader API is running 🚀"}
 
-
-     @app.get("/info")
+# --- ✨ FIXED: The indentation for this entire function was corrected ---
+@app.get("/info")
 async def get_video_info(request: Request, url: str):
-    # This part remains the same
     ydl_opts = {
         'quiet': True,
         'cookiefile': COOKIE_FILE_PATH
@@ -66,26 +65,24 @@ async def get_video_info(request: Request, url: str):
     
     info = None
     last_exception = None
-    for attempt in range(3):
+    for attempt in range(3):  # Try up to 3 times
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
+            
             if info:
                 logging.info(f"Successfully fetched info for {url} on attempt {attempt + 1}")
-                break 
+                break
         except Exception as e:
             last_exception = e
             logging.warning(f"Attempt {attempt + 1} failed for {url}. Retrying in 1 second...")
             time.sleep(1)
 
-    # --- ✨ BACKEND FIX 1: IMPROVED ERROR RESPONSE ---
     if not info:
         logging.error(f"All retry attempts failed for {url}. Last error: {last_exception}")
-        # Return a clean JSON error instead of raising HTTPException
         return {"error": "Could not retrieve video information. The link may be private, invalid, or contain extra text."}
 
     try:
-        # This whole section of processing formats remains the same
         all_formats = []
         video_only = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') == 'none' and f.get('url')]
         audio_only = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none' and f.get('url')]
@@ -113,14 +110,11 @@ async def get_video_info(request: Request, url: str):
         }
     except Exception as e:
         logging.error(f"Error processing formats for URL {url}: {e}")
-        # --- ✨ BACKEND FIX 2: IMPROVED ERROR RESPONSE ---
         return {"error": "Successfully fetched video, but failed to process the download formats."}
-
 
 @app.get("/merge_streams")
 async def merge_streams(url: str, background_tasks: BackgroundTasks):
     try:
-        # This part remains the same
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
         
@@ -150,10 +144,4 @@ async def merge_streams(url: str, background_tasks: BackgroundTasks):
         return FileResponse(path=output_path, media_type='video/mp4', filename=f"{info.get('title', 'video')}.mp4")
     except Exception as e:
         logging.error(f"Error in /merge_streams for URL {url}: {e}")
-        # --- ✨ BACKEND FIX 3: IMPROVED ERROR RESPONSE ---
-        # Note: This error will show to the user as a failed download, which is fine.
-        # But for consistency, we could return a JSON object, though it's less critical here.
         raise HTTPException(status_code=500, detail=str(e))
-
-
-
