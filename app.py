@@ -7,8 +7,34 @@ import subprocess
 import os
 import uuid
 import logging
-import time # Import the time module for delays
+import time 
 from urllib.parse import urlencode
+
+# --- ✨ NEW: SECURELY HANDLE COOKIES FROM A GIST URL ---
+# Define the path for our temporary cookie file
+COOKIE_FILE_PATH = "/tmp/cookies.txt"
+
+# Read the secret Gist URL from the environment variable set in Railway
+cookie_gist_url = os.getenv("COOKIE_GIST_URL")
+
+# If the URL exists, download its content and write it to the temporary file
+if cookie_gist_url:
+    try:
+        response = requests.get(cookie_gist_url)
+        response.raise_for_status() # Raise an exception for bad status codes
+        with open(COOKIE_FILE_PATH, "w") as f:
+            f.write(response.text)
+        logging.info("Successfully loaded cookies from Gist.")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Failed to download cookies from Gist: {e}")
+        # Create an empty file so the app doesn't crash
+        open(COOKIE_FILE_PATH, 'a').close()
+else:
+    # If the env var isn't set, create an empty file
+    logging.warning("COOKIE_GIST_URL not set. Proceeding without cookies.")
+    open(COOKIE_FILE_PATH, 'a').close()
+# --- END OF NEW SECTION ---
+
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
@@ -120,3 +146,4 @@ async def merge_streams(url: str, background_tasks: BackgroundTasks):
     except Exception as e:
         logging.error(f"Error in /merge_streams for URL {url}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
