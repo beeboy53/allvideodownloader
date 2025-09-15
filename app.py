@@ -78,7 +78,6 @@ async def get_video_info(request: Request, url: str):
 
     try:
         all_formats = []
-        # Loop through all available formats and add them to our list
         for f in info.get("formats", []):
             if f.get("url"):
                 all_formats.append({
@@ -87,14 +86,12 @@ async def get_video_info(request: Request, url: str):
                     "quality": f.get("format_note") or (f.get("height") and f"{f.get('height')}p") or "Audio",
                 })
         
-        # Sort by height (descending)
         sorted_formats = sorted(all_formats, key=lambda x: (x.get('height') or 0), reverse=True)
 
         return {"title": info.get("title"), "thumbnail": info.get("thumbnail"), "formats": sorted_formats}
     except Exception as e:
         logging.error(f"Error processing formats for URL {url}: {e}")
         return {"error": "Successfully fetched video, but failed to process the download formats."}
-# Add this new endpoint to your existing main.py file
 
 @app.get("/instagram_info")
 async def get_instagram_info(request: Request, url: str):
@@ -104,9 +101,8 @@ async def get_instagram_info(request: Request, url: str):
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'noplaylist': True, # Ensures it only gets the single post
+        'noplaylist': True,
     }
-    # This endpoint requires cookies to work reliably
     if COOKIE_FILE_PATH.exists() and COOKIE_FILE_PATH.stat().st_size > 0:
         ydl_opts['cookiefile'] = str(COOKIE_FILE_PATH)
     else:
@@ -132,21 +128,20 @@ async def get_instagram_info(request: Request, url: str):
     try:
         media_items = []
         
-        # Check if this is a carousel post (multi-image/video)
         if 'entries' in info:
             # It's a carousel, loop through each item
             for entry in info['entries']:
                 media_items.append({
                     "type": "video" if entry.get('vcodec') != 'none' else "image",
                     "thumbnail": entry.get('thumbnail'),
-                    "url": entry.get('url') # Direct download URL
+                    "url": entry.get('url')
                 })
         else:
             # It's a single post
             media_items.append({
                 "type": "video" if info.get('vcodec') != 'none' else "image",
                 "thumbnail": info.get('thumbnail'),
-                "url": info.get('url') # Direct download URL for single video/image
+                "url": info.get('url')
             })
             
         return {
