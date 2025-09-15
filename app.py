@@ -1,177 +1,168 @@
-from fastapi import FastAPI, Query, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
-import requests
 import subprocess
 import os
 import uuid
-import logging
 import time
 import threading
-import os, logging, requests
-
-# Path for temp cookies file
-COOKIE_FILE_PATH = "/tmp/cookies.txt"
-
-# Create file if it doesn’t exist (avoids crash)
-if not os.path.exists(COOKIE_FILE_PATH):
-    open(COOKIE_FILE_PATH, 'a').close()
-
-# Optional: load cookies from env var (GitHub Gist etc.)
-cookie_gist_url = os.getenv("COOKIE_GIST_URL")
-if cookie_gist_url:
-    try:
-        r = requests.get(cookie_gist_url)
-        r.raise_for_status()
-        with open(COOKIE_FILE_PATH, "w") as f:
-            f.write(r.text)
-        logging.info("✅ Cookies loaded")
-    except Exception as e:
-        logging.warning(f"Failed to load cookies: {e}")
 
 app = FastAPI()
 
-# Enable CORS
+# Enable CORS (allow all for now)
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Directory for temporary merged files
+# Temp folder for merged files
 DOWNLOAD_DIR = "/tmp/saveclips"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Track expiry times {filename: expiry_timestamp}
+# Track expiry {filename: expiry_timestamp}
 FILE_EXPIRY = {}
-
-def cleanup_files():
-    """Background job: remove expired files"""
-    while True:
-        now = time.time()
-        expired = [f for f, exp in FILE_EXPIRY.items() if now > exp]
-        for fname in expired:
-            try:
-                fpath = os.path.join(DOWNLOAD_DIR, fname)
-                if os.path.isfile(fpath):
-                    os.remove(fpath)
-                    logging.info(f"🧹 Deleted expired file {fname}")
-            except Exception as e:
-                logging.error(f"Error deleting {fname}: {e}")
-            FILE_EXPIRY.pop(fname, None)
-        time.sleep(300)  # check every 5 mins
-
-threading.Thread(target=cleanup_files, daemon=True).start()
 
 
 @app.get("/")
 def home():
-    return {"message": "Video Downloader API is running 🚀"}
+    return {"message": "SaveClips API is running 🚀"}
 
 
 @app.get("/info")
-async def get_video_info(request: Request, url: str):
-    """Fetch metadata + formats"""
+def get_info(url: str = Query(..., description="Video URL to fetch info")):
+    """
+    Return video title, thumbnail, and available formats.
+    """
     try:
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        all_formats = []
-        video_only = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') == 'none']
-        audio_only = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-
-        # Add merged option if both exist
-        if video_only and audio_only:
-            merge_url = str(request.base_url) + "merge_streams?url=" + url
-            all_formats.append({
-                'quality': 'Best Quality (Merged)',
-                'ext': 'mp4',
-                'url': merge_url,
-                'download_url': merge_url,
-                'vcodec': 'merged',
-                'acodec': 'merged',
-                'height': max(v.get('height', 0) for v in video_only)
-            })
-
-        for f in info.get("formats", []):
-            if f.get("url"):
-                all_formats.append({
-                    "url": f.get("url"),
-                    "ext": f.get("ext"),
-                    "height": f.get("height"),
-                    "acodec": f.get("acodec"),
-                    "vcodec": f.get("vcodec"),
-                    "quality": f.get("format_note") or (f.get("height") and f"{f.get('height')}p") or "Audio",
-                    "filesize": f.get("filesize"),
-                    "filesize_approx": f.get("filesize_approx")
-                })
-
-        return {
-            "title": info.get("title"),
-            "thumbnail": info.get("thumbnail"),
-            "formats": sorted(all_formats, key=lambda x: x.get('height') or 0, reverse=True)
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch video info: {str(e)}")
-
-
-@app.get("/merge_streams")
-async def merge_streams(url: str):
-    try:
-        ydl_opts = {
-            "quiet": True,
-            "cookiefile": COOKIE_FILE_PATH
-        }
+        ydl_opts = {"quiet": True}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-        # Pick best video-only and best audio-only
+        formats = []
+        for f in info.get("formats", []):
+            if f.get("url"):
+                formats.append({
+                    "url": f["url"],
+                    "ext": f.get("ext"),
+                    "height": f.get("height"),
+                    "vcodec": f.get("vcodec"),
+                    "acodec": f.get("acodec"),
+                    "quality": f.get("format_note") or (f.get("height") and f"{f['height']}p") or "Audio"
+                })
+
+        return {
+            "title": info.get("title", "Untitled Video"),
+            "thumbnail": info.get("thumbnail"),
+            "formats": formats
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/merge_streams")
+def merge_streams(
+    url: str = Query(..., description="Video URL"),
+    expiry: int = Query(3600, description="File expiry in seconds"),
+    background_tasks: BackgroundTasks = None
+):
+    """
+    Merge best video + best audio into MP4 using ffmpeg (re-encode).
+    """
+    try:
+        # Extract info
+        with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        # Pick best video-only & audio-only
         best_video = max(
-            (f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('acodec') == 'none'),
-            key=lambda x: x.get('height', 0)
+            (f for f in info["formats"] if f.get("vcodec") != "none" and f.get("acodec") == "none"),
+            key=lambda x: x.get("height") or 0
         )
         best_audio = max(
-            (f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none'),
-            key=lambda x: x.get('abr', 0)
+            (f for f in info["formats"] if f.get("acodec") != "none" and f.get("vcodec") == "none"),
+            key=lambda x: x.get("abr") or 0
         )
 
-        request_id = str(uuid.uuid4())
-        video_path = f"/tmp/{request_id}_v.mp4"
-        audio_path = f"/tmp/{request_id}_a.m4a"
-        output_path = f"/tmp/{request_id}_merged.mp4"
+        # Generate file path
+        file_id = str(uuid.uuid4())
+        output_path = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp4")
 
-        # Download video
-        with requests.get(best_video['url'], stream=True) as r:
-            r.raise_for_status()
-            with open(video_path, 'wb') as f:
-                for chunk in r.iter_content(8192): f.write(chunk)
-
-        # Download audio
-        with requests.get(best_audio['url'], stream=True) as r:
-            r.raise_for_status()
-            with open(audio_path, 'wb') as f:
-                for chunk in r.iter_content(8192): f.write(chunk)
-
-        # Merge into playable MP4
+        # ffmpeg command (stream + re-encode)
         ffmpeg_cmd = [
             "ffmpeg", "-y",
-            "-i", video_path, "-i", audio_path,
+            "-i", best_video["url"],
+            "-i", best_audio["url"],
             "-c:v", "libx264", "-c:a", "aac",
             "-movflags", "+faststart",
             output_path
         ]
-        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+
+        process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+
         if process.returncode != 0:
             raise HTTPException(status_code=500, detail=f"FFmpeg failed: {process.stderr}")
 
-        safe_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in info.get("title", "video"))
-        return FileResponse(
-            path=output_path,
-            media_type="video/mp4",
-            filename=f"{safe_title}.mp4",
-            headers={"Content-Disposition": f'attachment; filename="{safe_title}.mp4"'}
-        )
+        # Track expiry
+        FILE_EXPIRY[f"{file_id}.mp4"] = time.time() + expiry
 
+        return {
+            "status": "ok",
+            "title": info.get("title", "video"),
+            "download_url": f"/files/{file_id}.mp4",
+            "expires_in": expiry
+        }
+
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="FFmpeg process timed out.")
     except Exception as e:
-        logging.error(f"Merge error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/files/{filename}")
+def serve_file(filename: str):
+    """
+    Serve merged MP4 if not expired.
+    """
+    file_path = os.path.join(DOWNLOAD_DIR, filename)
+
+    if filename in FILE_EXPIRY and time.time() > FILE_EXPIRY[filename]:
+        try:
+            os.remove(file_path)
+        except:
+            pass
+        FILE_EXPIRY.pop(filename, None)
+        raise HTTPException(status_code=410, detail="File expired")
+
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="video/mp4", filename=filename)
+
+    raise HTTPException(status_code=404, detail="File not found")
+
+
+# Cleanup expired files in background
+def cleanup_old_files():
+    while True:
+        now = time.time()
+        expired = []
+        for fname, expiry in FILE_EXPIRY.items():
+            if now > expiry:
+                fpath = os.path.join(DOWNLOAD_DIR, fname)
+                if os.path.isfile(fpath):
+                    try:
+                        os.remove(fpath)
+                        print(f"🧹 Deleted expired file: {fpath}")
+                    except:
+                        pass
+                expired.append(fname)
+        for fname in expired:
+            FILE_EXPIRY.pop(fname, None)
+        time.sleep(300)
+
+
+import threading
+threading.Thread(target=cleanup_old_files, daemon=True).start()
