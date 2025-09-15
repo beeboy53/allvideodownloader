@@ -97,9 +97,12 @@ async def get_video_info(request: Request, url: str):
 
 @app.get("/merge_streams")
 async def merge_streams(url: str):
-    """Download + merge best video/audio → return as forced file download"""
     try:
-        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+        ydl_opts = {
+            "quiet": True,
+            "cookiefile": COOKIE_FILE_PATH
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
         best_video = max((f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('acodec') == 'none'),
@@ -107,34 +110,37 @@ async def merge_streams(url: str):
         best_audio = max((f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') == 'none'),
                          key=lambda x: x.get('abr', 0))
 
-        # Unique filenames
         request_id = str(uuid.uuid4())
         video_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_v.mp4")
         audio_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_a.m4a")
         output_path = os.path.join(DOWNLOAD_DIR, f"{request_id}_o.mp4")
 
-        # Download streams
+        # Download video
         with requests.get(best_video['url'], stream=True) as r:
             r.raise_for_status()
             with open(video_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
 
+        # Download audio
         with requests.get(best_audio['url'], stream=True) as r:
             r.raise_for_status()
             with open(audio_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
 
-        # Merge
-        ffmpeg_cmd = ['ffmpeg', '-i', video_path, '-i', audio_path, '-c', 'copy', output_path]
+        # Re-encode for compatibility
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',
+            '-i', video_path, '-i', audio_path,
+            '-c:v', 'libx264', '-c:a', 'aac',
+            '-movflags', '+faststart',
+            output_path
+        ]
         process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if process.returncode != 0:
-            raise HTTPException(status_code=500, detail="Failed to merge video/audio.")
+            raise HTTPException(status_code=500, detail=f"FFmpeg error: {process.stderr}")
 
-        # Track expiry (1h)
-        filename = os.path.basename(output_path)
-        FILE_EXPIRY[filename] = time.time() + 3600
+        FILE_EXPIRY[os.path.basename(output_path)] = time.time() + 3600
 
-        # ✅ Force direct download
         safe_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in info.get("title", "video"))
         return FileResponse(
             path=output_path,
