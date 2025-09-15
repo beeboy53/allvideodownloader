@@ -1,5 +1,6 @@
 fastapi
 uvicorn[standard]
-yt-dlp
+yt-dlp>=2025.09.01  
 requests
+
 
