@@ -55,34 +55,37 @@ def cleanup_files(paths: list):
 def home():
     return {"message": "Video Downloader API is running 🚀"}
 
-@app.get("/info")
+
+     @app.get("/info")
 async def get_video_info(request: Request, url: str):
-    ydl_opts = {'quiet': True}
+    # This part remains the same
+    ydl_opts = {
+        'quiet': True,
+        'cookiefile': COOKIE_FILE_PATH
+    }
     
-    # --- ✨ NEW: Automatic Retry Logic ---
     info = None
     last_exception = None
-    for attempt in range(3): # Try up to 3 times
+    for attempt in range(3):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-            
-            # If we successfully get the info, stop retrying
             if info:
                 logging.info(f"Successfully fetched info for {url} on attempt {attempt + 1}")
                 break 
         except Exception as e:
             last_exception = e
             logging.warning(f"Attempt {attempt + 1} failed for {url}. Retrying in 1 second...")
-            time.sleep(1) # Wait 1 second before the next attempt
+            time.sleep(1)
 
-    # If all retries failed, raise an error
+    # --- ✨ BACKEND FIX 1: IMPROVED ERROR RESPONSE ---
     if not info:
         logging.error(f"All retry attempts failed for {url}. Last error: {last_exception}")
-        raise HTTPException(status_code=500, detail=f"Could not retrieve video information after multiple attempts. The link may be private or invalid.")
-    # --- End of Retry Logic ---
+        # Return a clean JSON error instead of raising HTTPException
+        return {"error": "Could not retrieve video information. The link may be private, invalid, or contain extra text."}
 
     try:
+        # This whole section of processing formats remains the same
         all_formats = []
         video_only = [f for f in info.get('formats', []) if f.get('vcodec') != 'none' and f.get('acodec') == 'none' and f.get('url')]
         audio_only = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none' and f.get('url')]
@@ -110,12 +113,14 @@ async def get_video_info(request: Request, url: str):
         }
     except Exception as e:
         logging.error(f"Error processing formats for URL {url}: {e}")
-        raise HTTPException(status_code=500, detail="Successfully fetched video, but failed to process formats.")
+        # --- ✨ BACKEND FIX 2: IMPROVED ERROR RESPONSE ---
+        return {"error": "Successfully fetched video, but failed to process the download formats."}
 
 
 @app.get("/merge_streams")
 async def merge_streams(url: str, background_tasks: BackgroundTasks):
     try:
+        # This part remains the same
         with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
             info = ydl.extract_info(url, download=False)
         
@@ -145,5 +150,10 @@ async def merge_streams(url: str, background_tasks: BackgroundTasks):
         return FileResponse(path=output_path, media_type='video/mp4', filename=f"{info.get('title', 'video')}.mp4")
     except Exception as e:
         logging.error(f"Error in /merge_streams for URL {url}: {e}")
+        # --- ✨ BACKEND FIX 3: IMPROVED ERROR RESPONSE ---
+        # Note: This error will show to the user as a failed download, which is fine.
+        # But for consistency, we could return a JSON object, though it's less critical here.
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
