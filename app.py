@@ -17,9 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 logging.basicConfig(level=logging.INFO)
 app = FastAPI()
 
-# Temporary file storage location (Railway-safe)
 TEMP_DIR = Path("/tmp")
-# Path for the cookie file, which will be loaded from a Gist
 COOKIE_FILE_PATH = TEMP_DIR / "cookies.txt"
 
 
@@ -38,19 +36,22 @@ def cleanup_old_files():
     logging.info(f"Running startup cleanup of old files in {TEMP_DIR}...")
     now = datetime.now()
     cutoff = now - timedelta(hours=1)
-    for path in TEMP_DIR.iterdir():
-        if path.is_file():
-            try:
+    try:
+        for path in TEMP_DIR.iterdir():
+            if path.is_file():
                 file_mod_time = datetime.fromtimestamp(path.stat().st_mtime)
                 if file_mod_time < cutoff:
                     os.remove(path)
                     logging.info(f"Removed old temp file: {path.name}")
-            except Exception as e:
-                logging.error(f"Error during cleanup of old file {path.name}: {e}")
+    except FileNotFoundError:
+        logging.warning(f"Temp directory {TEMP_DIR} not found. Skipping cleanup.")
+    except Exception as e:
+        logging.error(f"Error during cleanup of old files: {e}")
 
 def sanitize_filename(name: str) -> str:
     """Removes characters that are invalid in filenames."""
-    # Allow letters, numbers, spaces, underscores, hyphens, and periods
+    if not name:
+        return "video"
     return "".join(c for c in name if c.isalnum() or c in " ._-").rstrip()
 
 
@@ -58,7 +59,6 @@ def sanitize_filename(name: str) -> str:
 @app.on_event("startup")
 def startup_event():
     """Tasks to run when the application starts."""
-    # Load cookies from the environment variable (Gist URL)
     cookie_gist_url = os.getenv("COOKIE_GIST_URL")
     if cookie_gist_url:
         try:
@@ -71,18 +71,13 @@ def startup_event():
             logging.error(f"Failed to download cookies from Gist: {e}")
     else:
         logging.warning("COOKIE_GIST_URL not set. Proceeding without cookies.")
-    
-    # Clean up any leftover files from previous runs
     cleanup_old_files()
 
 
 # --- Middleware ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
 
@@ -93,16 +88,14 @@ def home():
 
 @app.get("/info")
 async def get_video_info(request: Request, url: str):
-    """
-    Fetches video metadata and a list of all available download formats.
-    """
+    """Fetches video metadata and a list of all available download formats."""
+    # ✨ FIX: Reverted to a simpler ydl_opts, like your original working code.
+    # This is more reliable for finding all stream types.
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'noplaylist': True,
     }
-    # Only add the cookiefile option if the file actually exists and has content
     if COOKIE_FILE_PATH.exists() and COOKIE_FILE_PATH.stat().st_size > 0:
         ydl_opts['cookiefile'] = str(COOKIE_FILE_PATH)
 
@@ -145,7 +138,6 @@ async def get_video_info(request: Request, url: str):
                     "quality": f.get("format_note") or (f.get("height") and f"{f.get('height')}p") or "Audio",
                 })
         
-        # Sort by height (descending), putting merged format first if heights are equal
         sorted_formats = sorted(all_formats, key=lambda x: (x.get('height') or 0, x.get('vcodec') == 'merged'), reverse=True)
 
         return {"title": info.get("title"), "thumbnail": info.get("thumbnail"), "formats": sorted_formats}
@@ -155,10 +147,7 @@ async def get_video_info(request: Request, url: str):
 
 @app.get("/merge_streams")
 async def merge_streams(url: str, background_tasks: BackgroundTasks):
-    """
-    Downloads the best video and audio streams, merges them, and returns the
-    final MP4 file directly for download.
-    """
+    """Downloads, merges, and returns the final MP4 file."""
     try:
         with yt_dlp.YoutubeDL({'quiet': True, 'noplaylist': True}) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -174,7 +163,6 @@ async def merge_streams(url: str, background_tasks: BackgroundTasks):
         files_to_cleanup = [video_path, audio_path, output_path]
         background_tasks.add_task(cleanup_files, files_to_cleanup)
 
-        # Download video and audio files
         with requests.get(best_video['url'], stream=True) as r:
             r.raise_for_status()
             with open(video_path, 'wb') as f:
@@ -184,17 +172,14 @@ async def merge_streams(url: str, background_tasks: BackgroundTasks):
             with open(audio_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
         
-        # Merge with ffmpeg
         ffmpeg_cmd = ['ffmpeg', '-i', str(video_path), '-i', str(audio_path), '-c', 'copy', str(output_path)]
         process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
         if process.returncode != 0:
             logging.error(f"FFmpeg Error: {process.stderr}")
             raise HTTPException(status_code=500, detail=f"Failed to merge files. FFmpeg error: {process.stderr}")
 
-        # Sanitize title for the filename
-        safe_filename = sanitize_filename(info.get('title', 'video')) + ".mp4"
+        safe_filename = sanitize_filename(info.get('title')) + ".mp4"
         
-        # ✨ KEY FIX: The 'filename' parameter forces a download (Content-Disposition: attachment)
         return FileResponse(path=output_path, media_type='video/mp4', filename=safe_filename)
 
     except Exception as e:
