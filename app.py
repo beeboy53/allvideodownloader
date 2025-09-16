@@ -19,7 +19,6 @@ COOKIE_FILE_PATH = TEMP_DIR / "cookies.txt"
 # --- App Events ---
 @app.on_event("startup")
 def startup_event():
-    """Tasks to run when the application starts."""
     cookie_gist_url = os.getenv("COOKIE_GIST_URL")
     if cookie_gist_url:
         try:
@@ -48,7 +47,6 @@ def home():
 
 @app.get("/info")
 async def get_video_info(request: Request, url: str):
-    """Fetches video metadata and a list of available download formats."""
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -65,7 +63,6 @@ async def get_video_info(request: Request, url: str):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             if info:
-                logging.info(f"Successfully fetched info for {url} on attempt {attempt + 1}")
                 break
         except Exception as e:
             last_exception = e
@@ -87,7 +84,6 @@ async def get_video_info(request: Request, url: str):
                 })
         
         sorted_formats = sorted(all_formats, key=lambda x: (x.get('height') or 0), reverse=True)
-
         return {"title": info.get("title"), "thumbnail": info.get("thumbnail"), "formats": sorted_formats}
     except Exception as e:
         logging.error(f"Error processing formats for URL {url}: {e}")
@@ -95,63 +91,44 @@ async def get_video_info(request: Request, url: str):
 
 @app.get("/instagram_info")
 async def get_instagram_info(request: Request, url: str):
-    """
-    Dedicated endpoint for Instagram that handles single posts and carousels (multi-image/video).
-    """
+    # --- ✨ MODIFIED: Now handles image-only posts gracefully ---
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'ignoreerrors': True, # Key change: tells yt-dlp to not treat "no video" as a fatal error
     }
     if COOKIE_FILE_PATH.exists() and COOKIE_FILE_PATH.stat().st_size > 0:
         ydl_opts['cookiefile'] = str(COOKIE_FILE_PATH)
     else:
         return {"error": "Server is not configured for Instagram downloads. Cookie file is missing."}
 
-    info = None
-    last_exception = None
-    for attempt in range(3):
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-            if info:
-                break
-        except Exception as e:
-            last_exception = e
-            logging.warning(f"Instagram attempt {attempt + 1} failed. Retrying...")
-            time.sleep(1)
-
-    if not info:
-        logging.error(f"All Instagram retry attempts failed. Last error: {last_exception}")
-        return {"error": "Could not retrieve Instagram post. The link may be invalid or the post is private."}
-
     try:
+        # No need for a retry loop here, as 'ignoreerrors' handles the main failure case
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if not info:
+            return {"error": "Could not retrieve any information from the Instagram link."}
+
         media_items = []
         
-        # --- ✨ MODIFIED SECTION: This logic now filters for photos only ---
         if 'entries' in info:
-            # It's a carousel, loop through each item
             for entry in info['entries']:
-                # Only add the item if it's an image (does not have a video codec)
-                if not entry.get('vcodec') or entry.get('vcodec') == 'none':
+                # The 'url' key is a reliable indicator of a downloadable image
+                if entry.get('url') and (not entry.get('vcodec') or entry.get('vcodec') == 'none'):
                     media_items.append({
-                        "type": "image",
-                        "thumbnail": entry.get('thumbnail'),
-                        "url": entry.get('url')
+                        "type": "image", "thumbnail": entry.get('thumbnail'), "url": entry.get('url')
                     })
         else:
-            # It's a single post, check if it's an image
-            if not info.get('vcodec') or info.get('vcodec') == 'none':
-                media_items.append({
-                    "type": "image",
-                    "thumbnail": info.get('thumbnail'),
-                    "url": info.get('url')
+            # For single posts, check for image properties
+            if info.get('url') and (not info.get('vcodec') or info.get('vcodec') == 'none'):
+                 media_items.append({
+                    "type": "image", "thumbnail": info.get('thumbnail'), "url": info.get('url')
                 })
         
-        # If after filtering, no photos were found, return a specific error
         if not media_items:
             return {"error": "No downloadable photos were found in this post. This tool only supports downloading images."}
-        # --- END OF MODIFIED SECTION ---
             
         return {
             "title": info.get('title'),
@@ -160,4 +137,4 @@ async def get_instagram_info(request: Request, url: str):
         }
     except Exception as e:
         logging.error(f"Error processing Instagram formats: {e}")
-        return {"error": "Failed to process the Instagram media."}
+        return {"error": "An unexpected error occurred while processing the Instagram post."}
