@@ -120,29 +120,19 @@ async def get_instagram_info(request: Request, url: str):
             for entry in info['entries']:
                 if not entry:
                     continue
-                if entry.get('url') and (not entry.get('vcodec') or entry.get('vcodec') == 'none'):
+                if entry.get('url'):
+                    media_type = "image" if (not entry.get('vcodec') or entry.get('vcodec') == 'none') else "video"
                     media_items.append({
-                        "type": "image",
-                        "thumbnail": entry.get('thumbnail'),
-                        "url": entry.get('url')
-                    })
-                elif entry.get('url'):
-                    media_items.append({
-                        "type": "video",
+                        "type": media_type,
                         "thumbnail": entry.get('thumbnail'),
                         "url": entry.get('url')
                     })
         else:
             # Single item
-            if info.get('url') and (not info.get('vcodec') or info.get('vcodec') == 'none'):
+            if info.get('url'):
+                media_type = "image" if (not info.get('vcodec') or info.get('vcodec') == 'none') else "video"
                 media_items.append({
-                    "type": "image",
-                    "thumbnail": info.get('thumbnail'),
-                    "url": info.get('url')
-                })
-            elif info.get('url'):
-                media_items.append({
-                    "type": "video",
+                    "type": media_type,
                     "thumbnail": info.get('thumbnail'),
                     "url": info.get('url')
                 })
