@@ -91,12 +91,11 @@ async def get_video_info(request: Request, url: str):
 
 @app.get("/instagram_info")
 async def get_instagram_info(request: Request, url: str):
-    # --- ✨ MODIFIED: Now handles image-only posts gracefully ---
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'ignoreerrors': True, # Key change: tells yt-dlp to not treat "no video" as a fatal error
+        'ignoreerrors': True,
     }
     if COOKIE_FILE_PATH.exists() and COOKIE_FILE_PATH.stat().st_size > 0:
         ydl_opts['cookiefile'] = str(COOKIE_FILE_PATH)
@@ -104,7 +103,6 @@ async def get_instagram_info(request: Request, url: str):
         return {"error": "Server is not configured for Instagram downloads. Cookie file is missing."}
 
     try:
-        # No need for a retry loop here, as 'ignoreerrors' handles the main failure case
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
@@ -113,15 +111,17 @@ async def get_instagram_info(request: Request, url: str):
 
         media_items = []
         
-        if 'entries' in info:
+        if 'entries' in info and info['entries']:
             for entry in info['entries']:
-                # The 'url' key is a reliable indicator of a downloadable image
+                # ✨ FIX: Added a check to skip empty (None) items in a carousel
+                if not entry:
+                    continue 
+                
                 if entry.get('url') and (not entry.get('vcodec') or entry.get('vcodec') == 'none'):
                     media_items.append({
                         "type": "image", "thumbnail": entry.get('thumbnail'), "url": entry.get('url')
                     })
         else:
-            # For single posts, check for image properties
             if info.get('url') and (not info.get('vcodec') or info.get('vcodec') == 'none'):
                  media_items.append({
                     "type": "image", "thumbnail": info.get('thumbnail'), "url": info.get('url')
