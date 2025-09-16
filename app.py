@@ -14,22 +14,32 @@ app = FastAPI()
 
 TEMP_DIR = Path("/tmp")
 COOKIE_FILE_PATH = TEMP_DIR / "cookies.txt"
+COOKIE_GIST_URL = os.getenv("COOKIE_GIST_URL")
+
+
+# --- Helper Function ---
+def download_cookies():
+    """Download cookies.txt from COOKIE_GIST_URL and save it locally."""
+    if not COOKIE_GIST_URL:
+        logging.warning("⚠️ COOKIE_GIST_URL is not set.")
+        return False
+
+    try:
+        response = requests.get(COOKIE_GIST_URL, timeout=10)
+        response.raise_for_status()
+        COOKIE_FILE_PATH.write_text(response.text)
+        logging.info("✅ Cookies refreshed successfully from Gist.")
+        return True
+    except requests.exceptions.RequestException as e:
+        logging.error(f"❌ Failed to refresh cookies: {e}")
+        return False
 
 
 # --- App Events ---
 @app.on_event("startup")
 def startup_event():
-    cookie_gist_url = os.getenv("COOKIE_GIST_URL")
-    if cookie_gist_url:
-        try:
-            response = requests.get(cookie_gist_url, timeout=10)
-            response.raise_for_status()
-            COOKIE_FILE_PATH.write_text(response.text)
-            logging.info("✅ Successfully loaded cookies from Gist.")
-        except requests.exceptions.RequestException as e:
-            logging.error(f"⚠️ Failed to download cookies from Gist: {e}")
-    else:
-        logging.warning("⚠️ COOKIE_GIST_URL not set. Proceeding without cookies.")
+    if not download_cookies():
+        logging.warning("⚠️ Proceeding without cookies. Instagram may not work.")
 
 
 # --- Middleware ---
@@ -43,6 +53,15 @@ app.add_middleware(
 @app.get("/")
 def home():
     return {"message": "SaveClips API is running 🚀"}
+
+
+@app.get("/refresh_cookies")
+def refresh_cookies():
+    """Manually refresh cookies from Gist without restarting the server."""
+    success = download_cookies()
+    if success:
+        return {"message": "✅ Cookies refreshed successfully."}
+    return {"error": "❌ Failed to refresh cookies. Check logs."}
 
 
 @app.get("/info")
@@ -108,44 +127,44 @@ async def get_instagram_info(request: Request, url: str):
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+    except Exception as e:
+        logging.error(f"❌ yt-dlp failed for Instagram URL: {e}")
+        return {"error": f"yt-dlp failed: {str(e)}"}
 
-        if not info:
-            logging.error("yt-dlp returned no info for Instagram URL.")
-            return {"error": "Could not retrieve any information from the Instagram link."}
+    if not info:
+        logging.error("yt-dlp returned no info for Instagram URL.")
+        return {"error": "Could not retrieve any information from the Instagram link."}
 
-        media_items = []
+    media_items = []
 
-        # Carousel (multiple images/videos)
-        if 'entries' in info and info['entries']:
-            for entry in info['entries']:
-                if not entry:
-                    continue
-                if entry.get('url'):
-                    media_type = "image" if (not entry.get('vcodec') or entry.get('vcodec') == 'none') else "video"
-                    media_items.append({
-                        "type": media_type,
-                        "thumbnail": entry.get('thumbnail'),
-                        "url": entry.get('url')
-                    })
-        else:
-            # Single item
-            if info.get('url'):
-                media_type = "image" if (not info.get('vcodec') or info.get('vcodec') == 'none') else "video"
+    # Carousel (multiple images/videos)
+    if 'entries' in info and info['entries']:
+        for entry in info['entries']:
+            if not entry:
+                continue
+            if entry.get('url'):
+                media_type = "image" if (not entry.get('vcodec') or entry.get('vcodec') == 'none') else "video"
                 media_items.append({
                     "type": media_type,
-                    "thumbnail": info.get('thumbnail'),
-                    "url": info.get('url')
+                    "thumbnail": entry.get('thumbnail'),
+                    "url": entry.get('url')
                 })
+    else:
+        # Single item
+        if info.get('url'):
+            media_type = "image" if (not info.get('vcodec') or info.get('vcodec') == 'none') else "video"
+            media_items.append({
+                "type": media_type,
+                "thumbnail": info.get('thumbnail'),
+                "url": info.get('url')
+            })
 
-        if not media_items:
-            return {"error": "No downloadable media were found in this post."}
+    if not media_items:
+        logging.warning(f"No downloadable media found for {url}.")
+        return {"error": "No downloadable media were found in this post."}
 
-        return {
-            "title": info.get('title'),
-            "uploader": info.get('uploader'),
-            "media": media_items
-        }
-
-    except Exception as e:
-        logging.error(f"❌ Error processing Instagram formats: {e}")
-        return {"error": f"An unexpected error occurred: {str(e)}"}
+    return {
+        "title": info.get('title'),
+        "uploader": info.get('uploader'),
+        "media": media_items
+    }
