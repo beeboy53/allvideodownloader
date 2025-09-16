@@ -112,59 +112,72 @@ async def get_video_info(request: Request, url: str):
 
 @app.get("/instagram_info")
 async def get_instagram_info(request: Request, url: str):
-    if not COOKIE_FILE_PATH.exists() or COOKIE_FILE_PATH.stat().st_size == 0:
-        return {"error": "Server is not configured for Instagram downloads. Cookie file is missing."}
-
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'ignoreerrors': True,
-        'cookiefile': str(COOKIE_FILE_PATH),
-        'extractor_args': {'instagram': ['reel,story,post']},  # Force Instagram extractor
     }
+
+    # ✅ Check if cookies exist
+    if COOKIE_FILE_PATH.exists() and COOKIE_FILE_PATH.stat().st_size > 0:
+        ydl_opts['cookiefile'] = str(COOKIE_FILE_PATH)
+    else:
+        return {"error": "Instagram cookies are missing. Please upload a valid cookies.txt file."}
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
+
+        # ✅ If yt-dlp gave us nothing, cookies are likely expired
+        if not info:
+            return {"error": "Instagram cookies may be expired or invalid. Please refresh cookies.txt."}
+
+        media_items = []
+
+        # Handle carousel posts
+        if 'entries' in info and info['entries']:
+            for entry in info['entries']:
+                if not entry:
+                    continue
+                if entry.get('url'):
+                    if entry.get('vcodec') and entry['vcodec'] != 'none':
+                        media_items.append({
+                            "type": "video",
+                            "thumbnail": entry.get('thumbnail'),
+                            "url": entry.get('url')
+                        })
+                    else:
+                        media_items.append({
+                            "type": "image",
+                            "thumbnail": entry.get('thumbnail'),
+                            "url": entry.get('url')
+                        })
+        else:
+            # Handle single post (image or video)
+            if info.get('url'):
+                if info.get('vcodec') and info['vcodec'] != 'none':
+                    media_items.append({
+                        "type": "video",
+                        "thumbnail": info.get('thumbnail'),
+                        "url": info.get('url')
+                    })
+                else:
+                    media_items.append({
+                        "type": "image",
+                        "thumbnail": info.get('thumbnail'),
+                        "url": info.get('url')
+                    })
+
+        if not media_items:
+            return {"error": "No downloadable media were found. (Tip: Refresh cookies.txt if this is a video/reel)"}
+
+        return {
+            "title": info.get('title'),
+            "uploader": info.get('uploader'),
+            "media": media_items
+        }
+
     except Exception as e:
-        logging.error(f"❌ yt-dlp failed for Instagram URL: {e}")
-        return {"error": f"yt-dlp failed: {str(e)}"}
-
-    if not info:
-        logging.error("yt-dlp returned no info for Instagram URL.")
-        return {"error": "Could not retrieve any information from the Instagram link."}
-
-    media_items = []
-
-    # Carousel (multiple images/videos)
-    if 'entries' in info and info['entries']:
-        for entry in info['entries']:
-            if not entry:
-                continue
-            if entry.get('url'):
-                media_type = "image" if (not entry.get('vcodec') or entry.get('vcodec') == 'none') else "video"
-                media_items.append({
-                    "type": media_type,
-                    "thumbnail": entry.get('thumbnail'),
-                    "url": entry.get('url')
-                })
-    else:
-        # Single item
-        if info.get('url'):
-            media_type = "image" if (not info.get('vcodec') or info.get('vcodec') == 'none') else "video"
-            media_items.append({
-                "type": media_type,
-                "thumbnail": info.get('thumbnail'),
-                "url": info.get('url')
-            })
-
-    if not media_items:
-        logging.warning(f"No downloadable media found for {url}.")
-        return {"error": "No downloadable media were found in this post."}
-
-    return {
-        "title": info.get('title'),
-        "uploader": info.get('uploader'),
-        "media": media_items
-    }
+        logging.error(f"Error processing Instagram formats: {e}")
+        return {"error": f"Unexpected error: {str(e)}"}
