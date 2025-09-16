@@ -128,21 +128,30 @@ async def get_instagram_info(request: Request, url: str):
     try:
         media_items = []
         
+        # --- ✨ MODIFIED SECTION: This logic now filters for photos only ---
         if 'entries' in info:
             # It's a carousel, loop through each item
             for entry in info['entries']:
-                media_items.append({
-                    "type": "video" if entry.get('vcodec') != 'none' else "image",
-                    "thumbnail": entry.get('thumbnail'),
-                    "url": entry.get('url')
-                })
+                # Only add the item if it's an image (does not have a video codec)
+                if not entry.get('vcodec') or entry.get('vcodec') == 'none':
+                    media_items.append({
+                        "type": "image",
+                        "thumbnail": entry.get('thumbnail'),
+                        "url": entry.get('url')
+                    })
         else:
-            # It's a single post
-            media_items.append({
-                "type": "video" if info.get('vcodec') != 'none' else "image",
-                "thumbnail": info.get('thumbnail'),
-                "url": info.get('url')
-            })
+            # It's a single post, check if it's an image
+            if not info.get('vcodec') or info.get('vcodec') == 'none':
+                media_items.append({
+                    "type": "image",
+                    "thumbnail": info.get('thumbnail'),
+                    "url": info.get('url')
+                })
+        
+        # If after filtering, no photos were found, return a specific error
+        if not media_items:
+            return {"error": "No downloadable photos were found in this post. This tool only supports downloading images."}
+        # --- END OF MODIFIED SECTION ---
             
         return {
             "title": info.get('title'),
